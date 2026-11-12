@@ -1,31 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Instagram profil boti (bitta fayl, faqat Python standart kutubxonasi).
+"""Instagram profil / post boti - HAMMA XIZMAT BEPUL, admin boshqaruv paneli bilan.
+Bitta fayl, faqat Python standart kutubxonasi (post yuklash uchun ixtiyoriy: pip install yt-dlp).
 
 ISHGA TUSHIRISH: IDLE'da oching -> F5. To'xtatish: Ctrl+C.
 Ma'lumotlar shu fayl yonidagi instbot_data.json ga saqlanadi.
 
-MA'LUMOT MANBASI (PROVIDER)
-Instagram o'zi ochiq API bermaydi, shuning uchun profil, hikoya va postlar
-tashqi ma'lumot xizmati (provayder) orqali olinadi. Quyida PROVIDER_URL va
-PROVIDER_KEY ni to'ldirmaguncha bot "ma'lumot manbasi sozlanmagan" deydi.
-Kutilayotgan so'rovlar (GET, sarlavha: Authorization: Bearer KEY):
-  {PROVIDER_URL}/instagram/profile?username=...      -> {username, full_name, bio, avatar_url,
-                                                          followers, following, posts, is_private, has_stories}
-  {PROVIDER_URL}/instagram/stories|posts|reels|tagged?username=...
-                                                      -> {items:[{url|video_url, caption, taken_at,
-                                                                  likes, comments, views, link}]}
-  {PROVIDER_URL}/instagram/highlights?username=...   -> {items:[{title, items:[...yuqoridagidek...]}]}
-  {PROVIDER_URL}/instagram/media?url=<post havolasi> -> {items:[...yuqoridagidek...]}   (post/Reels yuklash)
-Provayder bo'lmasa, ommaviy post/Reels havolalari uchun ixtiyoriy ochiq dastur ishlatiladi:
-CMD'da `pip install yt-dlp` (Instagram uni ba'zan to'sadi, kafolat yo'q; hikoyalar bu yo'l bilan olinmaydi).
-Tanlagan provayderingiz javob shakli boshqacha bo'lsa, faqat map_profile / map_items
-funksiyalarini moslang. Yopiq profillar uchun ma'lumot olinmaydi.
+ADMIN: ADMIN_IDS dagi foydalanuvchi /admin yozadi yoki pastdagi
+"📊 Bot statistikasi" / "⚙️ Tizim sozlamalari" tugmalarini bosadi.
+
+MA'LUMOT MANBASI (PROVIDER). Instagram ochiq API bermaydi, profil/hikoya/postlar tashqi
+ma'lumot xizmati orqali olinadi. PROVIDER_URL va PROVIDER_KEY ni to'ldirmaguncha profil
+ma'lumotlari chiqmaydi (menyu, admin panel, post havolasidan video yuklash ishlaydi).
+Kutilayotgan so'rovlar (GET, Authorization: Bearer KEY):
+  {PROVIDER_URL}/instagram/profile?username=...   -> {username, full_name, bio, avatar_url,
+                                                       followers, following, posts, is_private, has_stories}
+  {PROVIDER_URL}/instagram/stories|posts|reels|tagged?username=...  -> {items:[{url|video_url, caption,
+                                                       taken_at, likes, comments, views, link}]}
+  {PROVIDER_URL}/instagram/highlights?username=... -> {items:[{title, items:[...]}]}
+  {PROVIDER_URL}/instagram/media?url=<post havolasi> -> {items:[...]}
+Javob shakli boshqacha bo'lsa, map_profile / map_items funksiyalarini moslang.
+Yopiq profillar uchun ma'lumot olinmaydi.
 """
 import html
+import importlib.util
 import json
 import os
 import re
-import sys
 import time
 import traceback
 import urllib.error
@@ -35,23 +35,18 @@ from datetime import datetime
 
 # Maxfiy qiymatlar hosting sozlamalaridagi "Environment variables" dan olinadi.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "8741379218"))   # admin (Premium funksiyalar unga doim ochiq)
+OWNER_ID = int(os.getenv("OWNER_ID", "8741379218"))
+ADMIN_IDS = {OWNER_ID}          # boshqa adminlar ID'sini shu yerga qo'shing: {OWNER_ID, 123456789}
 
-PROVIDER_URL = os.getenv("PROVIDER_URL", "")          # masalan: "https://api.provider.com/v1"
+PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # masalan: "https://api.provider.com/v1"
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
+# Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
+# masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
+PROXY = os.getenv("PROXY", "")
 
-FREE_DAILY_LIMIT = 5
-PREMIUM_DAILY_LIMIT = 100
 TRACK_INTERVAL = 1800          # kuzatuv tekshiruvi (soniya)
 TRACK_MAX = 10
 PAGE = 5
-
-# Tariflar: kalit -> (nomi, Telegram Stars narxi, kun). Narx va muddatni o'zgartirishingiz mumkin.
-PLANS = {
-    "premium": ("👑 Premium", 300, 30),
-    "standard": ("🚀 Standartli", 200, 14),
-    "minimal": ("🌱 Minimal", 100, 7),
-}
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 try:
@@ -60,6 +55,11 @@ except NameError:
     BASE = os.getcwd()
 BASE = os.getenv("DATA_DIR", BASE)
 DB_FILE = os.path.join(BASE, "instbot_data.json")
+
+
+def is_admin(uid):
+    return uid in ADMIN_IDS
+
 
 # ---------------------------------------------------------------- matnlar
 T = {
@@ -70,30 +70,25 @@ T = {
                  "Masalan: samoylovaoxana yoki https://www.instagram.com/samoylovaoxana",
         "loading": "⏳ Yuklanmoqda...",
         "bad_input": "❌ Foydalanuvchi nomi yoki profil havolasi noto'g'ri. Masalan: samoylovaoxana",
-        "limit": "📛 Bugungi limit tugadi ({used}/{limit}). Limitni oshirish uchun «Tariflar» bo'limiga o'ting.",
+        "limit": "📛 Bugungi limit tugadi ({used}/{limit}). Ertaga qayta urinib ko'ring.",
+        "maintenance": "🛠 Bot vaqtincha to'xtatilgan (texnik ishlar). Keyinroq qayta urinib ko'ring.",
         "not_configured": "⚠️ Ma'lumot manbasi hali sozlanmagan. Administratorga murojaat qiling.",
         "not_found": "🔍 Profil topilmadi.",
         "private": "🔒 Bu profil yopiq yoki ma'lumotlarga ruxsat yo'q. Faqat ommaviy ma'lumotlar ko'rsatiladi.",
         "rate_limit": "⏳ So'rovlar cheklovi. Keyinroq qayta urinib ko'ring.",
         "error": "⚠️ Texnik xatolik yuz berdi. Keyinroq qayta urinib ko'ring.",
         "media_fail": "❌ Postni olib bo'lmadi. Havola noto'g'ri, post yopiq yoki o'chirilgan bo'lishi mumkin.",
+        "network": "🌐 Instagram'ga ulanib bo'lmadi. Server tarmog'ida Instagram bloklangan bo'lishi mumkin, VPN'ni tekshiring.",
         "followers": "Obunachilar", "following": "Obunalar", "posts": "Postlar", "stories": "Hikoyalar",
         "choose_action": "@{u} profili uchun amalni tanlang 👇",
         "btn_view": "Profilni ko'rib chiqish", "btn_stories": "Hikoyalar", "btn_posts": "Postlar",
         "btn_highlights": "Dolzarb", "btn_reels": "Reels", "btn_refresh": "Qayta ulanishlar",
         "btn_tagged": "Qayd etilganlar", "btn_track": "Kuzatuv", "btn_analytics": "Tahlillar",
-        "locked": "🔒 Bu funksiya Premium tariflar uchun. «Tariflar» bo'limiga qarang.",
         "empty": "Hech narsa topilmadi.",
         "next": "➡️ Keyingisi ({a}/{b})",
         "hl_title": "Dolzarb to'plamlar — @{u}",
-        "tariff": "Tarif: <b>{plan}</b>\nHolat: {status}\nTugash sanasi: <b>{until}</b>",
-        "free": "Bepul", "active": "🟢 <b>Faol</b>", "inactive": "🔴 <b>Nofaol</b>",
-        "plan_btn": "{name} — {stars} ⭐ / {days} kun",
-        "plan_desc": "Premium obuna: {days} kun",
-        "pay_ok": "✅ To'lov tasdiqlandi. Premium {until} gacha faol.",
-        "pay_fail": "❌ To'lovni tasdiqlab bo'lmadi. Administratorga murojaat qiling.",
         "track_title": "👁 Kuzatuv ro'yxati (o'chirish uchun ❌ bosing)",
-        "track_empty": "Kuzatuv ro'yxati bo'sh. Profil oynasidagi «Kuzatuv» tugmasi bilan qo'shing (Premium).",
+        "track_empty": "Kuzatuv ro'yxati bo'sh. Profil oynasidagi «Kuzatuv» tugmasi bilan qo'shing.",
         "track_added": "✅ @{u} kuzatuvga qo'shildi. Yangi post yoki obunachilar o'zgarganda xabar beraman.",
         "track_exists": "@{u} allaqachon kuzatuvda.",
         "track_full": "Kuzatuv limiti ({n}) to'ldi.",
@@ -109,14 +104,15 @@ T = {
         "btn_lang": "🌐 Tilni almashtirish", "btn_notif_on": "🔔 Bildirishnomalar: yoqilgan",
         "btn_notif_off": "🔕 Bildirishnomalar: o'chirilgan", "btn_clear": "🗑 Tarixni tozalash",
         "btn_delete": "⚠️ Ma'lumotlarimni o'chirish",
-        "confirm_delete": "Barcha ma'lumotlaringiz (tarix, kuzatuv, tarif) o'chiriladi. Davom etasizmi?",
+        "confirm_delete": "Barcha ma'lumotlaringiz (tarix, kuzatuv) o'chiriladi. Davom etasizmi?",
         "btn_yes": "Ha, o'chirish", "btn_no": "Bekor qilish",
         "deleted": "Ma'lumotlaringiz o'chirildi. Qayta boshlash uchun /start bosing.",
         "cleared": "Tarix tozalandi.",
         "support_prompt": "Savolingizni yozing, administrator javob beradi.",
         "support_sent": "✅ Xabaringiz yuborildi.",
-        "b_tariff": "🗝 Tariflar", "b_track": "👁 Kuzatuv", "b_analytics": "📊 Tahlillar",
+        "b_track": "👁 Kuzatuv", "b_analytics": "📊 Tahlillar",
         "b_settings": "⚙️ Moslamalar", "b_support": "ℹ️ Qo'llab-quvvatlash",
+        "b_admin_stats": "📊 Bot statistikasi", "b_admin_settings": "⚙️ Tizim sozlamalari",
     },
     "ru": {
         "choose_lang": "Assalomu alaykum! Tilni tanlang.\n\nЗдравствуйте! Выберите язык.",
@@ -125,30 +121,25 @@ T = {
                  "Например: samoylovaoxana или https://www.instagram.com/samoylovaoxana",
         "loading": "⏳ Загрузка...",
         "bad_input": "❌ Имя пользователя или ссылка неверны. Например: samoylovaoxana",
-        "limit": "📛 Дневной лимит исчерпан ({used}/{limit}). Чтобы увеличить его, откройте «Тарифы».",
+        "limit": "📛 Дневной лимит исчерпан ({used}/{limit}). Попробуйте завтра.",
+        "maintenance": "🛠 Бот временно остановлен (технические работы). Повторите позже.",
         "not_configured": "⚠️ Источник данных ещё не настроен. Обратитесь к администратору.",
         "not_found": "🔍 Профиль не найден.",
         "private": "🔒 Профиль закрыт или доступ к данным ограничен. Показываются только публичные данные.",
         "rate_limit": "⏳ Превышен лимит запросов. Повторите позже.",
         "error": "⚠️ Произошла техническая ошибка. Повторите позже.",
         "media_fail": "❌ Не удалось получить пост. Ссылка неверна, пост закрыт или удалён.",
+        "network": "🌐 Не удалось подключиться к Instagram. Возможно, он заблокирован в сети сервера, проверьте VPN.",
         "followers": "Подписчики", "following": "Подписки", "posts": "Публикации", "stories": "Истории",
         "choose_action": "Выберите действие для профиля @{u} 👇",
         "btn_view": "Открыть профиль", "btn_stories": "Истории", "btn_posts": "Посты",
         "btn_highlights": "Актуальное", "btn_reels": "Reels", "btn_refresh": "Обновить",
         "btn_tagged": "Отметки", "btn_track": "Слежение", "btn_analytics": "Аналитика",
-        "locked": "🔒 Функция доступна в тарифах Premium. Откройте «Тарифы».",
         "empty": "Ничего не найдено.",
         "next": "➡️ Далее ({a}/{b})",
         "hl_title": "Актуальное — @{u}",
-        "tariff": "Тариф: <b>{plan}</b>\nСтатус: {status}\nДействует до: <b>{until}</b>",
-        "free": "Бесплатный", "active": "🟢 <b>Активен</b>", "inactive": "🔴 <b>Неактивен</b>",
-        "plan_btn": "{name} — {stars} ⭐ / {days} дн.",
-        "plan_desc": "Подписка Premium: {days} дн.",
-        "pay_ok": "✅ Оплата подтверждена. Premium активен до {until}.",
-        "pay_fail": "❌ Не удалось подтвердить оплату. Обратитесь к администратору.",
         "track_title": "👁 Список слежения (❌ — удалить)",
-        "track_empty": "Список пуст. Добавьте кнопкой «Слежение» в карточке профиля (Premium).",
+        "track_empty": "Список пуст. Добавьте кнопкой «Слежение» в карточке профиля.",
         "track_added": "✅ @{u} добавлен. Сообщу о новом посте или изменении подписчиков.",
         "track_exists": "@{u} уже в списке.",
         "track_full": "Лимит слежения ({n}) исчерпан.",
@@ -164,20 +155,38 @@ T = {
         "btn_lang": "🌐 Сменить язык", "btn_notif_on": "🔔 Уведомления: включены",
         "btn_notif_off": "🔕 Уведомления: выключены", "btn_clear": "🗑 Очистить историю",
         "btn_delete": "⚠️ Удалить мои данные",
-        "confirm_delete": "Все ваши данные (история, слежение, тариф) будут удалены. Продолжить?",
+        "confirm_delete": "Все ваши данные (история, слежение) будут удалены. Продолжить?",
         "btn_yes": "Да, удалить", "btn_no": "Отмена",
         "deleted": "Данные удалены. Нажмите /start, чтобы начать заново.",
         "cleared": "История очищена.",
         "support_prompt": "Напишите вопрос, администратор ответит.",
         "support_sent": "✅ Сообщение отправлено.",
-        "b_tariff": "🗝 Тарифы", "b_track": "👁 Слежение", "b_analytics": "📊 Аналитика",
+        "b_track": "👁 Слежение", "b_analytics": "📊 Аналитика",
         "b_settings": "⚙️ Настройки", "b_support": "ℹ️ Поддержка",
+        "b_admin_stats": "📊 Статистика бота", "b_admin_settings": "⚙️ Системные настройки",
     },
 }
-BTN = {T[lg]["b_" + a]: a for lg in T for a in ("tariff", "track", "analytics", "settings", "support")}
+
+# Admin tahrirlay oladigan matnlar va tugmalar: (kalit, admin uchun nomi)
+EDIT_TEXTS = [("start", "Start xabari"), ("bad_input", "Noto'g'ri havola"), ("not_found", "Profil topilmadi"),
+              ("private", "Yopiq profil"), ("rate_limit", "API cheklovi"), ("error", "Texnik xatolik"),
+              ("not_configured", "Manba sozlanmagan"), ("media_fail", "Post olinmadi"),
+              ("network", "Ulanish xatosi"), ("empty", "Hech narsa topilmadi"), ("choose_action", "Amal tanlash"),
+              ("support_prompt", "Yordam so'rovi"), ("maintenance", "Texnik ishlar"), ("limit", "Limit tugadi")]
+EDIT_BTNS = [("b_track", "Kuzatuv (pastki)"), ("b_analytics", "Tahlillar (pastki)"),
+             ("b_settings", "Moslamalar (pastki)"), ("b_support", "Qo'llab-quvvatlash (pastki)"),
+             ("btn_view", "Profilni ko'rib chiqish"), ("btn_stories", "Hikoyalar"), ("btn_posts", "Postlar"),
+             ("btn_highlights", "Dolzarb"), ("btn_reels", "Reels"), ("btn_refresh", "Qayta ulanishlar"),
+             ("btn_tagged", "Qayd etilganlar"), ("btn_track", "Kuzatuv (profil)"),
+             ("btn_analytics", "Tahlillar (profil)")]
+NAMES = dict(EDIT_TEXTS + EDIT_BTNS)
+BTN_KEYS = {k for k, _ in EDIT_BTNS}
+HINTS = {"choose_action": "{u} — profil nomi o'rniga qo'yiladi.", "limit": "{used} va {limit} — sarflangan va umumiy limit."}
 
 # ---------------------------------------------------------------- baza (JSON)
-db = {"users": {}, "history": {}, "tracked": {}, "snapshots": {}, "payments": {}, "errors": [], "searches": 0}
+DEFAULT_CFG = {"enabled": True, "recent": True, "daily_limit": 0}
+db = {"users": {}, "history": {}, "tracked": {}, "snapshots": {}, "errors": [], "searches": 0, "downloads": 0,
+      "texts": {"uz": {}, "ru": {}}, "buttons_off": [], "cfg": dict(DEFAULT_CFG)}
 CACHE = {}
 PENDING_BC = {}
 
@@ -189,6 +198,9 @@ def load():
                 db.update(json.load(f))
         except (OSError, ValueError):
             print("Ogohlantirish: baza fayli o'qilmadi, yangisi yaratiladi.")
+    db["cfg"] = {**DEFAULT_CFG, **db.get("cfg", {})}
+    for lg in T:
+        db["texts"].setdefault(lg, {})
 
 
 def save():
@@ -201,18 +213,22 @@ def save():
 def user(uid):
     now = time.time()
     return db["users"].setdefault(str(uid), {
-        "lang": None, "notif": True, "banned": False, "premium_until": 0, "plan": None,
-        "created": now, "last": now, "state": None, "day": "", "count": 0, "username": None})
+        "lang": None, "notif": True, "banned": False, "created": now, "last": now,
+        "state": None, "day": "", "count": 0, "username": None})
 
 
-def is_premium(uid):
-    return uid == OWNER_ID or user(uid)["premium_until"] > time.time()
+def text_for(lang, key):
+    return db["texts"].get(lang, {}).get(key) or T[lang].get(key) or T["uz"].get(key, key)
 
 
 def tr(uid, key, **kw):
-    lang = user(uid)["lang"] or "uz"
-    s = T[lang].get(key) or T["uz"][key]
-    return s.format(**kw) if kw else s
+    s = text_for(user(uid)["lang"] or "uz", key)
+    if kw:
+        try:
+            return s.format(**kw)
+        except (KeyError, IndexError, ValueError):
+            return s
+    return s
 
 
 def log_error(where, msg):
@@ -226,10 +242,6 @@ h = html.escape
 
 def num(v):
     return "—" if v is None else f"{v:,}".replace(",", " ")
-
-
-def fmt_date(ts):
-    return datetime.fromtimestamp(ts).strftime("%d.%m.%Y")
 
 
 def fmt_taken(v):
@@ -259,7 +271,11 @@ def send(chat, text, markup=None, **kw):
     if markup:
         p["reply_markup"] = markup
     p.update(kw)
-    return api("sendMessage", **p)
+    r = api("sendMessage", **p)
+    if not r.get("ok") and r.get("code") == 400 and p.get("parse_mode"):
+        p.pop("parse_mode")                      # admin yozgan matnda HTML xato bo'lsa, oddiy matn sifatida yuboramiz
+        r = api("sendMessage", **p)
+    return r
 
 
 def ikb(rows):
@@ -273,23 +289,48 @@ def answer(cq, text=None, alert=False):
     api("answerCallbackQuery", **p)
 
 
+def edit_or_send(cq, chat, text, markup=None):
+    mid = cq.get("message", {}).get("message_id")
+    if mid:
+        r = api("editMessageText", chat_id=chat, message_id=mid, text=text, parse_mode="HTML",
+                disable_web_page_preview=True, reply_markup=markup or ikb([]))
+        if r.get("ok"):
+            return
+    send(chat, text, markup)
+
+
 def main_kb(uid):
-    recent = []
-    for x in reversed(db["history"].get(str(uid), [])):
-        if x not in recent:
-            recent.append(x)
-        if len(recent) == 4:
-            break
-    rows = [[{"text": "@" + x} for x in recent[i:i + 2]] for i in range(0, len(recent), 2)]
-    rows += [[{"text": tr(uid, "b_tariff")}],
-             [{"text": tr(uid, "b_track")}, {"text": tr(uid, "b_analytics")}],
-             [{"text": tr(uid, "b_settings")}, {"text": tr(uid, "b_support")}]]
-    return {"keyboard": rows, "resize_keyboard": True}
+    off = db["buttons_off"]
+    rows = []
+    if db["cfg"]["recent"]:
+        recent = []
+        for x in reversed(db["history"].get(str(uid), [])):
+            if x not in recent:
+                recent.append(x)
+            if len(recent) == 4:
+                break
+        rows += [[{"text": "@" + x} for x in recent[i:i + 2]] for i in range(0, len(recent), 2)]
+    for pair in (("b_track", "b_analytics"), ("b_settings", "b_support")):
+        row = [{"text": tr(uid, k)} for k in pair if k not in off]
+        if row:
+            rows.append(row)
+    if is_admin(uid):
+        rows.append([{"text": tr(uid, "b_admin_stats")}, {"text": tr(uid, "b_admin_settings")}])
+    return {"keyboard": rows, "resize_keyboard": True} if rows else {"remove_keyboard": True}
 
 
 def lang_kb():
     return ikb([[{"text": "🇺🇿 O'zbek tili", "callback_data": "lang:uz"}],
                 [{"text": "🇷🇺 Русский язык", "callback_data": "lang:ru"}]])
+
+
+def button_action(text):
+    """Pastki tugma matnidan amalni topadi (admin o'zgartirgan nomlar ham hisobga olinadi)."""
+    for act, key in (("track", "b_track"), ("analytics", "b_analytics"), ("settings", "b_settings"),
+                     ("support", "b_support"), ("astats", "b_admin_stats"), ("asettings", "b_admin_settings")):
+        if any(text_for(lg, key) == text for lg in T):
+            return act
+    return None
 
 
 # ---------------------------------------------------------------- provayder
@@ -385,18 +426,27 @@ def ytdlp_media(url):
         import yt_dlp
     except ImportError:
         return None
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "socket_timeout": 20}
+    if PROXY:
+        opts["proxy"] = PROXY
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
+        with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=False)
     except Exception as e:
-        raise ProviderError("not_found", repr(e)[:200])
+        s = str(e)
+        print("[yt-dlp]", s[:300])
+        if any(x in s for x in ("getaddrinfo", "timed out", "Connection", "Errno 110", "Network is unreachable",
+                                "ProxyError", "SSL")):
+            raise ProviderError("network", s[:200])
+        raise ProviderError("not_found", s[:200])
     items = []
     for e in info.get("entries") or [info]:
         link = e.get("url") or (e.get("formats") or [{}])[-1].get("url")
         if not link:
             continue
         video = e.get("vcodec") not in (None, "none") or str(e.get("ext", "")).lower() in ("mp4", "mov", "webm")
-        items.append({"url": link, "video": video, "caption": (e.get("description") or info.get("description") or "")[:200],
+        items.append({"url": link, "video": video,
+                      "caption": (e.get("description") or info.get("description") or "")[:200],
                       "taken": e.get("timestamp"), "likes": to_int(e.get("like_count")),
                       "comments": to_int(e.get("comment_count")), "views": to_int(e.get("view_count")), "link": None})
     return items
@@ -415,35 +465,9 @@ def fetch_post(url):
     return items
 
 
-def handle_post(uid, chat, m):
-    if not check_limit(uid, chat):
-        return
-    kind = "reel" if m.group(1).lower() in ("reel", "reels") else m.group(1).lower()
-    url = f"https://www.instagram.com/{kind}/{m.group(2)}/"
-    wait = send(chat, tr(uid, "loading"))
-    mid = wait.get("result", {}).get("message_id")
-    try:
-        items = fetch_post(url)
-        err = None if items else tr(uid, "media_fail")
-    except ProviderError as e:
-        err = tr(uid, "media_fail") if e.code == "not_found" else provider_msg(uid, "media", e)
-    if err:
-        if mid:
-            api("editMessageText", chat_id=chat, message_id=mid, text=err)
-        else:
-            send(chat, err)
-        return
-    if mid:
-        api("deleteMessage", chat_id=chat, message_id=mid)
-    user(uid)["count"] += 1
-    db["searches"] += 1
-    for it in items[:10]:
-        send_item(chat, it)
-
-
 def provider_msg(uid, where, e):
     key = {"not_configured": "not_configured", "not_found": "not_found", "private": "private",
-           "rate_limit": "rate_limit"}.get(e.code, "error")
+           "rate_limit": "rate_limit", "network": "network"}.get(e.code, "error")
     if key == "error":
         log_error(where, e)
     return tr(uid, key)
@@ -459,15 +483,22 @@ def snapshot(p):
 
 
 def action_kb(uid, name):
-    lock = "" if is_premium(uid) else "🔒 "
-    b = lambda key, cb, locked=False: {"text": (lock if locked else "") + tr(uid, key), "callback_data": cb}
-    return ikb([
-        [{"text": "🔳 " + tr(uid, "btn_view"), "url": f"https://www.instagram.com/{name}/"}],
-        [b("btn_stories", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
-        [b("btn_highlights", f"ig:hl:{name}", True), b("btn_reels", f"ig:re:{name}:0", True)],
-        [b("btn_refresh", f"ig:rf:{name}", True), b("btn_tagged", f"ig:tg:{name}:0", True)],
-        [b("btn_track", f"ig:tr:{name}", True), b("btn_analytics", f"ig:an:{name}")],
-    ])
+    off = db["buttons_off"]
+
+    def b(key, cb):
+        return None if key in off else {"text": tr(uid, key), "callback_data": cb}
+
+    rows = []
+    if "btn_view" not in off:
+        rows.append([{"text": "🔳 " + tr(uid, "btn_view"), "url": f"https://www.instagram.com/{name}/"}])
+    for pair in ([b("btn_stories", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
+                 [b("btn_highlights", f"ig:hl:{name}"), b("btn_reels", f"ig:re:{name}:0")],
+                 [b("btn_refresh", f"ig:rf:{name}"), b("btn_tagged", f"ig:tg:{name}:0")],
+                 [b("btn_track", f"ig:tr:{name}"), b("btn_analytics", f"ig:an:{name}")]):
+        row = [x for x in pair if x]
+        if row:
+            rows.append(row)
+    return ikb(rows)
 
 
 def send_card(uid, chat, p):
@@ -497,10 +528,12 @@ def send_card(uid, chat, p):
 
 def check_limit(uid, chat):
     u = user(uid)
-    limit = PREMIUM_DAILY_LIMIT if is_premium(uid) else FREE_DAILY_LIMIT
+    limit = db["cfg"]["daily_limit"]
     today = datetime.now().strftime("%Y-%m-%d")
     if u["day"] != today:
         u["day"], u["count"] = today, 0
+    if is_admin(uid) or not limit:
+        return True
     if u["count"] >= limit:
         send(chat, tr(uid, "limit", used=u["count"], limit=limit))
         return False
@@ -531,6 +564,32 @@ def lookup(uid, chat, name, refresh=False):
     del hist[:-50]
     snapshot(p)
     send_card(uid, chat, p)
+
+
+def handle_post(uid, chat, m):
+    if not check_limit(uid, chat):
+        return
+    kind = "reel" if m.group(1).lower() in ("reel", "reels") else m.group(1).lower()
+    url = f"https://www.instagram.com/{kind}/{m.group(2)}/"
+    wait = send(chat, tr(uid, "loading"))
+    mid = wait.get("result", {}).get("message_id")
+    try:
+        items = fetch_post(url)
+        err = None if items else tr(uid, "media_fail")
+    except ProviderError as e:
+        err = tr(uid, "media_fail") if e.code == "not_found" else provider_msg(uid, "media", e)
+    if err:
+        if mid:
+            api("editMessageText", chat_id=chat, message_id=mid, text=err)
+        else:
+            send(chat, err)
+        return
+    if mid:
+        api("deleteMessage", chat_id=chat, message_id=mid)
+    user(uid)["count"] += 1
+    db["downloads"] += 1
+    for it in items[:10]:
+        send_item(chat, it)
 
 
 def item_caption(it):
@@ -624,7 +683,7 @@ def analytics_text(uid, name):
     s = db["snapshots"].get(name, [])
     if not s:
         return tr(uid, "analytics_empty")
-    rows = s[-(15 if is_premium(uid) else 3):]
+    rows = s[-15:]
     lines, prev = [], None
     for r in rows:
         d = f" ({r['f'] - prev['f']:+d})" if prev and r["f"] is not None and prev["f"] is not None else ""
@@ -636,23 +695,6 @@ def analytics_text(uid, name):
         lo, hi = min(vals), max(vals)
         spark = "\n\n" + "".join("▁▂▃▄▅▆▇█"[0 if hi == lo else int((v - lo) / (hi - lo) * 7)] for v in vals)
     return f"<b>{tr(uid, 'analytics_title', u=h(name))}</b>\n\n" + "\n".join(lines) + spark
-
-
-def tariff_text(uid):
-    u = user(uid)
-    if uid == OWNER_ID:
-        return tr(uid, "tariff", plan="Admin", status=tr(uid, "active"), until="∞")
-    active = is_premium(uid)
-    plan = PLANS[u["plan"]][0] if u["plan"] in PLANS else tr(uid, "free")
-    until = fmt_date(u["premium_until"]) if u["premium_until"] else "—"
-    return tr(uid, "tariff", plan=h(plan if active else tr(uid, "free")),
-              status=tr(uid, "active" if active else "inactive"), until=until)
-
-
-def show_tariffs(uid, chat):
-    rows = [[{"text": tr(uid, "plan_btn", name=n, stars=s, days=d), "callback_data": "buy:" + k}]
-            for k, (n, s, d) in PLANS.items()]
-    send(chat, tariff_text(uid), ikb(rows))
 
 
 def show_tracked(uid, chat):
@@ -672,13 +714,7 @@ def show_analytics_pick(uid, chat):
     if not recent:
         send(chat, tr(uid, "no_history"))
         return
-    rows = [[{"text": "@" + n, "callback_data": f"ig:an:{n}"}] for n in recent[:8]]
-    send(chat, tr(uid, "analytics_pick"), ikb(rows))
-
-
-def show_settings(uid, chat):
-    on = user(uid)["notif"]
-    send(chat, tr(uid, "settings_title"), settings_kb(uid, on))
+    send(chat, tr(uid, "analytics_pick"), ikb([[{"text": "@" + n, "callback_data": f"ig:an:{n}"}] for n in recent[:8]]))
 
 
 def settings_kb(uid, on):
@@ -688,38 +724,219 @@ def settings_kb(uid, on):
                 [{"text": tr(uid, "btn_delete"), "callback_data": "set:del"}]])
 
 
-# ---------------------------------------------------------------- to'lov
-def valid_payment(uid, payload, currency, amount):
-    try:
-        kind, key, owner = payload.split(":")
-        return kind == "plan" and key in PLANS and int(owner) == uid and currency == "XTR" and amount == PLANS[key][1]
-    except ValueError:
-        return False
+# ---------------------------------------------------------------- admin panel
+def stats_panel():
+    now = time.time()
+    today0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    us = list(db["users"].values())
+    tracked = len({n for v in db["tracked"].values() for n in v})
+    has_ytdlp = importlib.util.find_spec("yt_dlp") is not None
+    if not PROVIDER_URL and not has_ytdlp:
+        tip = "⚠️ Ma'lumot manbasi ham, yt-dlp ham yo'q: profil va post ma'lumoti olinmaydi."
+    elif not PROVIDER_URL:
+        tip = "⚠️ Ma'lumot manbasi (PROVIDER_URL) sozlanmagan: profil ma'lumotlari chiqmaydi, post havolasi ishlaydi."
+    elif db["errors"] and now - db["errors"][-1]["t"] < 3600:
+        tip = "⚠️ So'nggi soatda xatoliklar bo'lgan, \"Xatoliklar\" tugmasini tekshiring."
+    else:
+        tip = "Botingiz holati a'lo darajada! ✅"
+    line = "━━━━━━━━━━━━━━━"
+    text = (f"📊 <b>BOT STATISTIKASI:</b>\n{line}\n"
+            f"👥 <b>Foydalanuvchilar:</b>\n"
+            f"├ Jami: <b>{len(us)}</b> ta\n"
+            f"├ Bugun qo'shilgan: <b>{sum(1 for x in us if x['created'] >= today0)}</b> ta\n"
+            f"├ Bugun kirganlar (DAU): <b>{sum(1 for x in us if x['last'] >= today0)}</b> ta\n"
+            f"├ Haftalik faol: <b>{sum(1 for x in us if now - x['last'] < 7 * 86400)}</b> ta\n"
+            f"└ Cheklanganlar: <b>{sum(1 for x in us if x['banned'])}</b> ta\n{line}\n"
+            f"🔎 <b>Faoliyat:</b>\n"
+            f"├ Profil qidiruvlari: <b>{db['searches']}</b> ta\n"
+            f"├ Yuklangan postlar: <b>{db['downloads']}</b> ta\n"
+            f"└ Kuzatuvdagi profillar: <b>{tracked}</b> ta\n{line}\n"
+            f"⚙️ <b>Tizim:</b>\n"
+            f"├ Bot holati: {'🟢 ishlayapti' if db['cfg']['enabled'] else '🔴 to&#39;xtatilgan'}\n"
+            f"├ Ma'lumot manbasi: {'✅ ulangan' if PROVIDER_URL else '⚠️ sozlanmagan'}\n"
+            f"├ yt-dlp: {'✅ o&#39;rnatilgan' if has_ytdlp else '❌ yo&#39;q'}\n"
+            f"└ Xatoliklar: <b>{len(db['errors'])}</b> ta\n{line}\n"
+            f"💡 <b>Tavsiya:</b>\n<i>{tip}</i>\n\n"
+            f"⏳ Yangilangan vaqt: {datetime.now():%d.%m.%Y %H:%M:%S}")
+    kb = ikb([[{"text": "🔄 Yangilash", "callback_data": "adm:stats"}],
+              [{"text": "⚙️ Tizim sozlamalari", "callback_data": "adm:settings"}],
+              [{"text": "📣 Ommaviy xabar", "callback_data": "adm:bc"},
+               {"text": "👤 Foydalanuvchi", "callback_data": "adm:user"}],
+              [{"text": "🐞 Xatoliklar", "callback_data": "adm:errors"}]])
+    return text, kb
 
 
-def grant(uid, days, plan=None):
+def settings_panel():
+    c = db["cfg"]
+    limit = c["daily_limit"] or "cheksiz"
+    state = "🟢 ishlayapti" if c["enabled"] else "🔴 to'xtatilgan"
+    text = ("⚙️ <b>Tizim sozlamalari:</b>\n\nBu yerda botning asosiy ishlash holatini, foydalanuvchilarga "
+            f"yuboriladigan matnlarni va tugmalarni tahrirlashingiz mumkin.\n\nBot: {state}\nKunlik limit: {limit}")
+    kb = ikb([[{"text": "🔴 Botni to'xtatish" if c["enabled"] else "🟢 Botni yoqish", "callback_data": "adm:enabled"}],
+              [{"text": ("✅" if c["recent"] else "❌") + " Oxirgi qidiruvlar tugmalari", "callback_data": "adm:recent"}],
+              [{"text": f"📛 Kunlik limit: {limit}", "callback_data": "adm:limit"}],
+              [{"text": "📄 Matnlar", "callback_data": "adm:texts"}, {"text": "🎛 Tugmalar", "callback_data": "adm:buttons"}],
+              [{"text": "⚠️ Matnlarni zavod holatiga qaytarish", "callback_data": "adm:factory"}],
+              [{"text": "⬅️ Boshqaruvga qaytish", "callback_data": "adm:stats"}]])
+    return text, kb
+
+
+def list_panel(kind):
+    items = EDIT_TEXTS if kind == "texts" else EDIT_BTNS
+    btns = []
+    for key, name in items:
+        mark = "✏️ " if any(db["texts"][lg].get(key) for lg in T) else ""
+        if kind == "buttons" and key in db["buttons_off"]:
+            mark = "🚫 "
+        btns.append({"text": mark + name, "callback_data": f"adm:i:{key}"})
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    rows.append([{"text": "⬅️ Orqaga", "callback_data": "adm:settings"}])
+    title = "📄 <b>Matnlar</b>" if kind == "texts" else "🎛 <b>Tugmalar</b>"
+    return title + "\n\nTahrirlash uchun tanlang. ✏️ — o'zgartirilgan" + (", 🚫 — yashirilgan." if kind == "buttons" else "."), ikb(rows)
+
+
+def item_panel(key):
+    is_btn = key in BTN_KEYS
+    text = f"<b>{h(NAMES[key])}</b> (<code>{key}</code>)\n\n" + "\n".join(
+        f"{lg.upper()}: <code>{h(text_for(lg, key)[:700])}</code>" for lg in T)
+    if key in HINTS:
+        text += "\n\n" + h(HINTS[key])
+    if is_btn and key in db["buttons_off"]:
+        text += "\n\n🚫 Hozir yashirilgan."
+    rows = [[{"text": "✏️ UZ", "callback_data": f"adm:e:uz:{key}"}, {"text": "✏️ RU", "callback_data": f"adm:e:ru:{key}"}]]
+    if is_btn:
+        rows.append([{"text": "✅ Ko'rsatish" if key in db["buttons_off"] else "🚫 Yashirish", "callback_data": f"adm:t:{key}"}])
+    rows.append([{"text": "♻️ Standart", "callback_data": f"adm:r:{key}"},
+                 {"text": "⬅️ Orqaga", "callback_data": "adm:buttons" if is_btn else "adm:texts"}])
+    return text, ikb(rows)
+
+
+def user_panel(uid):
+    x = db["users"].get(str(uid))
+    if not x:
+        return "Foydalanuvchi topilmadi.", None
+    text = (f"👤 ID: <code>{uid}</code> @{h(str(x.get('username') or '-'))}\nTil: {x['lang'] or '-'}\n"
+            f"Ro'yxatdan: {datetime.fromtimestamp(x['created']):%d.%m.%Y}\n"
+            f"Oxirgi faollik: {datetime.fromtimestamp(x['last']):%d.%m.%Y %H:%M}\n"
+            f"Bugungi so'rovlar: {x['count']}\nTarix: {len(db['history'].get(str(uid), []))}\n"
+            f"Kuzatuv: {len(db['tracked'].get(str(uid), []))}\n"
+            f"Holat: {'⛔ cheklangan' if x['banned'] else '✅ faol'}")
+    kb = None
+    if uid not in ADMIN_IDS:
+        kb = ikb([[{"text": "✅ Blokdan chiqarish" if x["banned"] else "⛔ Cheklash", "callback_data": f"adm:b:{uid}"}]])
+    return text, kb
+
+
+def errors_text():
+    e = db["errors"][-8:]
+    return "🐞 <b>Oxirgi xatoliklar</b>\n\n" + ("\n\n".join(
+        f"{datetime.fromtimestamp(x['t']):%d.%m %H:%M} {h(x['w'])}\n<code>{h(x['m'][-250:])}</code>" for x in e)
+        or "Xatolik yo'q ✅")
+
+
+def handle_adm_callback(cq, uid, chat, parts):
     u = user(uid)
-    u["premium_until"] = max(time.time(), u["premium_until"]) + days * 86400
-    if plan:
-        u["plan"] = plan
-    return u["premium_until"]
+    u["state"] = None
+    what = parts[1] if len(parts) > 1 else "stats"
+    answer(cq)
+    c = db["cfg"]
+    if what == "stats":
+        text, kb = stats_panel()
+        edit_or_send(cq, chat, text, kb)
+    elif what == "settings":
+        edit_or_send(cq, chat, *settings_panel())
+    elif what == "enabled":
+        c["enabled"] = not c["enabled"]
+        edit_or_send(cq, chat, *settings_panel())
+    elif what == "recent":
+        c["recent"] = not c["recent"]
+        edit_or_send(cq, chat, *settings_panel())
+        send(chat, "Klaviatura yangilandi.", main_kb(uid))
+    elif what == "limit":
+        u["state"] = "adm_limit"
+        send(chat, "Kunlik limitni raqam bilan yuboring (0 = cheksiz). Bekor qilish: /cancel")
+    elif what in ("texts", "buttons"):
+        edit_or_send(cq, chat, *list_panel(what))
+    elif what == "i" and len(parts) > 2 and parts[2] in NAMES:
+        edit_or_send(cq, chat, *item_panel(parts[2]))
+    elif what == "e" and len(parts) > 3 and parts[2] in T and parts[3] in NAMES:
+        u["state"] = f"adm_edit:{parts[2]}:{parts[3]}"
+        extra = ("\n" + h(HINTS[parts[3]])) if parts[3] in HINTS else ""
+        send(chat, f"Yangi {'tugma nomini' if parts[3] in BTN_KEYS else 'matnni'} yuboring ({parts[2].upper()})."
+                   f"{extra}\nBekor qilish: /cancel")
+    elif what == "t" and len(parts) > 2 and parts[2] in BTN_KEYS:
+        off = db["buttons_off"]
+        off.remove(parts[2]) if parts[2] in off else off.append(parts[2])
+        edit_or_send(cq, chat, *item_panel(parts[2]))
+    elif what == "r" and len(parts) > 2 and parts[2] in NAMES:
+        for lg in T:
+            db["texts"][lg].pop(parts[2], None)
+        if parts[2] in db["buttons_off"]:
+            db["buttons_off"].remove(parts[2])
+        edit_or_send(cq, chat, *item_panel(parts[2]))
+    elif what == "factory":
+        edit_or_send(cq, chat, "⚠️ Barcha o'zgartirilgan matnlar va tugma nomlari standartga qaytariladi, yashirilgan "
+                               "tugmalar qayta ko'rinadi. Davom etasizmi?",
+                     ikb([[{"text": "Ha, qaytarish", "callback_data": "adm:fyes"},
+                           {"text": "Bekor qilish", "callback_data": "adm:settings"}]]))
+    elif what == "fyes":
+        db["texts"] = {lg: {} for lg in T}
+        db["buttons_off"] = []
+        edit_or_send(cq, chat, *settings_panel())
+        send(chat, "✅ Zavod holatiga qaytarildi.", main_kb(uid))
+    elif what == "bc":
+        u["state"] = "adm_bc"
+        send(chat, "Yuboriladigan xabar matnini yozing. Bekor qilish: /cancel")
+    elif what == "user":
+        u["state"] = "adm_user"
+        send(chat, "Foydalanuvchi Telegram ID'sini yuboring. Bekor qilish: /cancel")
+    elif what == "errors":
+        edit_or_send(cq, chat, errors_text(), ikb([[{"text": "⬅️ Boshqaruvga qaytish", "callback_data": "adm:stats"}]]))
+    elif what == "b" and len(parts) > 2 and parts[2].isdigit() and int(parts[2]) not in ADMIN_IDS:
+        t = user(int(parts[2]))
+        t["banned"] = not t["banned"]
+        edit_or_send(cq, chat, *user_panel(int(parts[2])))
 
 
-def handle_payment(m):
-    uid, chat = m["from"]["id"], m["chat"]["id"]
-    sp = m["successful_payment"]
-    charge = sp["telegram_payment_charge_id"]
-    if charge in db["payments"]:
-        send(chat, tr(uid, "pay_ok", until=fmt_date(user(uid)["premium_until"])))
-        return
-    if not valid_payment(uid, sp["invoice_payload"], sp["currency"], sp["total_amount"]):
-        log_error("payment", f"mismatch charge={charge} payload={sp['invoice_payload']}")
-        send(chat, tr(uid, "pay_fail"))
-        return
-    key = sp["invoice_payload"].split(":")[1]
-    until = grant(uid, PLANS[key][2], key)
-    db["payments"][charge] = {"uid": uid, "plan": key, "amount": sp["total_amount"], "t": int(time.time())}
-    send(chat, tr(uid, "pay_ok", until=fmt_date(until)))
+def handle_admin_state(uid, chat, text):
+    """True qaytarsa, xabar admin holati sifatida qayta ishlangan."""
+    u = user(uid)
+    st = u["state"] or ""
+    if st == "adm_limit":
+        if not text.isdigit() or int(text) > 100000:
+            send(chat, "Faqat raqam yuboring (0 = cheksiz).")
+            return True
+        db["cfg"]["daily_limit"] = int(text)
+        u["state"] = None
+        send(chat, "✅ Saqlandi.")
+        send(chat, *settings_panel())
+        return True
+    if st.startswith("adm_edit:"):
+        _, lang, key = st.split(":", 2)
+        val = " ".join(text.split())[:40] if key in BTN_KEYS else text[:3500]
+        if not val:
+            send(chat, "Bo'sh bo'lmasin.")
+            return True
+        db["texts"][lang][key] = val
+        u["state"] = None
+        send(chat, "✅ Saqlandi. Yangi matn darhol kuchga kiradi.")
+        send(chat, *item_panel(key))
+        return True
+    if st == "adm_bc":
+        PENDING_BC[uid] = text
+        u["state"] = None
+        n = sum(1 for x in db["users"].values() if not x["banned"])
+        send(chat, f"{h(text)}\n\n— Yuqoridagi matn {n} ta foydalanuvchiga yuboriladi.",
+             ikb([[{"text": "✅ Yuborish", "callback_data": "bc:yes"}, {"text": "❌ Bekor", "callback_data": "bc:no"}]]))
+        return True
+    if st == "adm_user":
+        if not text.isdigit():
+            send(chat, "Faqat raqamli ID yuboring.")
+            return True
+        u["state"] = None
+        send(chat, *user_panel(int(text)))
+        return True
+    return False
 
 
 # ---------------------------------------------------------------- xabarlar
@@ -742,67 +959,6 @@ def show_start(uid, chat):
     send(chat, tr(uid, "start"), main_kb(uid))
 
 
-def handle_admin(uid, chat, cmd, arg):
-    now = time.time()
-    users = db["users"]
-    if cmd == "/admin":
-        st = (f"🛠 <b>Admin</b>\n\nFoydalanuvchilar: {len(users)}\n"
-              f"Faol (24 soat): {sum(1 for x in users.values() if now - x['last'] < 86400)}\n"
-              f"Premium: {sum(1 for x in users.values() if x['premium_until'] > now)}\n"
-              f"Qidiruvlar: {db['searches']}\nTo'lovlar: {len(db['payments'])}\n"
-              f"Kuzatuvdagi profillar: {len({n for v in db['tracked'].values() for n in v})}\n"
-              f"Xatoliklar: {len(db['errors'])}\n"
-              f"Ma'lumot manbasi: {'✅' if PROVIDER_URL else '⚠️ sozlanmagan'}\n\n"
-              "/user ID · /grant ID kun · /revoke ID · /ban ID · /unban ID\n"
-              "/broadcast matn · /reply ID matn · /errors")
-        send(chat, st)
-        return
-    parts = arg.split(None, 1)
-    target = int(parts[0]) if parts and parts[0].isdigit() else None
-    if cmd == "/errors":
-        e = db["errors"][-8:]
-        send(chat, "\n\n".join(f"{datetime.fromtimestamp(x['t']):%d.%m %H:%M} {h(x['w'])}\n<code>{h(x['m'][-250:])}</code>"
-                                for x in e) or "Xatolik yo'q ✅")
-    elif cmd == "/broadcast":
-        if not arg:
-            send(chat, "Format: /broadcast matn")
-            return
-        PENDING_BC[uid] = arg
-        n = sum(1 for x in users.values() if not x["banned"])
-        send(chat, f"{h(arg)}\n\n— Yuqoridagi matn {n} ta foydalanuvchiga yuboriladi.",
-             ikb([[{"text": "✅ Yuborish", "callback_data": "bc:yes"}, {"text": "❌ Bekor", "callback_data": "bc:no"}]]))
-    elif target is None:
-        send(chat, "Format: " + cmd + " ID ...")
-    elif cmd == "/user":
-        x = users.get(str(target))
-        if not x:
-            send(chat, "Topilmadi.")
-            return
-        send(chat, f"ID: <code>{target}</code> @{h(str(x.get('username') or '-'))}\nTil: {x['lang']}\n"
-                   f"Premium: {fmt_date(x['premium_until']) if x['premium_until'] > now else '—'}\n"
-                   f"Holat: {'⛔ cheklangan' if x['banned'] else '✅ faol'}\nBugungi qidiruv: {x['count']}")
-    elif cmd == "/grant":
-        days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-        if not 0 < days <= 3650:
-            send(chat, "Format: /grant ID kun (1..3650)")
-            return
-        until = grant(target, days)
-        send(chat, f"✅ Premium {fmt_date(until)} gacha berildi.")
-        send(target, tr(target, "pay_ok", until=fmt_date(until)))
-    elif cmd == "/revoke":
-        user(target)["premium_until"] = 0
-        send(chat, "✅ Premium bekor qilindi.")
-    elif cmd in ("/ban", "/unban"):
-        if target == OWNER_ID:
-            send(chat, "Egani cheklab bo'lmaydi.")
-            return
-        user(target)["banned"] = cmd == "/ban"
-        send(chat, "✅ Bajarildi.")
-    elif cmd == "/reply" and len(parts) > 1:
-        send(target, "💬 " + h(parts[1]))
-        send(chat, "✅ Yuborildi.")
-
-
 def handle_message(m):
     if m["chat"]["type"] != "private":
         return
@@ -810,18 +966,35 @@ def handle_message(m):
     u = user(uid)
     u["last"] = time.time()
     u["username"] = m["from"].get("username")
-    if u["banned"] and uid != OWNER_ID:
-        return
-    if "successful_payment" in m:
-        handle_payment(m)
+    admin = is_admin(uid)
+    if u["banned"] and not admin:
         return
     text = (m.get("text") or "").strip()
     if not text:
         return
+    if not db["cfg"]["enabled"] and not admin:
+        send(chat, tr(uid, "maintenance"))
+        return
     cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
-    if cmd in ("/admin", "/user", "/grant", "/revoke", "/ban", "/unban", "/broadcast", "/reply", "/errors"):
-        if uid == OWNER_ID:
-            handle_admin(uid, chat, cmd, text[len(text.split()[0]):].strip())
+    if admin and cmd in ("/admin", "/cancel", "/reply", "/ban", "/unban"):
+        arg = text[len(text.split()[0]):].strip()
+        if cmd == "/admin":
+            u["state"] = None
+            send(chat, *stats_panel())
+        elif cmd == "/cancel":
+            u["state"] = None
+            send(chat, "Bekor qilindi.")
+        else:
+            parts = arg.split(None, 1)
+            target = int(parts[0]) if parts and parts[0].isdigit() else None
+            if target is None:
+                send(chat, f"Format: {cmd} ID" + (" matn" if cmd == "/reply" else ""))
+            elif cmd == "/reply" and len(parts) > 1:
+                send(target, "💬 " + h(parts[1]))
+                send(chat, "✅ Yuborildi.")
+            elif cmd in ("/ban", "/unban") and target not in ADMIN_IDS:
+                user(target)["banned"] = cmd == "/ban"
+                send(chat, "✅ Bajarildi.")
         return
     if not u["lang"]:
         send(chat, T["uz"]["choose_lang"], lang_kb())
@@ -830,25 +1003,30 @@ def handle_message(m):
         u["state"] = None
         show_start(uid, chat)
         return
-    act = BTN.get(text)
-    if act:
+    act = button_action(text)
+    if act and (admin or act not in ("astats", "asettings")):
         u["state"] = None
-        if act == "tariff":
-            show_tariffs(uid, chat)
-        elif act == "track":
+        if act == "track":
             show_tracked(uid, chat)
         elif act == "analytics":
             show_analytics_pick(uid, chat)
         elif act == "settings":
-            show_settings(uid, chat)
+            send(chat, tr(uid, "settings_title"), settings_kb(uid, u["notif"]))
         elif act == "support":
             u["state"] = "support"
             send(chat, tr(uid, "support_prompt"))
+        elif act == "astats":
+            send(chat, *stats_panel())
+        elif act == "asettings":
+            send(chat, *settings_panel())
+        return
+    if admin and handle_admin_state(uid, chat, text):
         return
     if u["state"] == "support":
         u["state"] = None
         who = f"@{u['username']}" if u["username"] else m["from"].get("first_name", "")
-        send(OWNER_ID, f"📩 Support\nID: <code>{uid}</code> {h(who)}\n\n{h(text)}\n\n/reply {uid} javob")
+        for a in ADMIN_IDS:
+            send(a, f"📩 Support\nID: <code>{uid}</code> {h(who)}\n\n{h(text)}\n\n/reply {uid} javob")
         send(chat, tr(uid, "support_sent"))
         return
     pm = POST_URL.search(text)
@@ -866,15 +1044,38 @@ def handle_callback(cq):
     uid = cq["from"]["id"]
     chat = cq.get("message", {}).get("chat", {}).get("id", uid)
     u = user(uid)
-    if u["banned"] and uid != OWNER_ID:
+    admin = is_admin(uid)
+    if u["banned"] and not admin:
         answer(cq)
         return
     parts = cq.get("data", "").split(":")
     head = parts[0]
+    if head == "adm":
+        if admin:
+            handle_adm_callback(cq, uid, chat, parts)
+        else:
+            answer(cq, "Ruxsat yo'q", True)
+        return
+    if head == "bc":
+        answer(cq)
+        text = PENDING_BC.pop(uid, None) if admin else None
+        if parts[1:2] == ["yes"] and text:
+            ok = fail = 0
+            for k, x in list(db["users"].items()):
+                if x["banned"]:
+                    continue
+                r = send(int(k), h(text))
+                ok, fail = (ok + 1, fail) if r.get("ok") else (ok, fail + 1)
+                time.sleep(0.05)
+            send(chat, f"📣 Tugadi. Yuborildi: {ok}, xato: {fail}")
+        return
     if head == "lang" and len(parts) > 1 and parts[1] in T:
         u["lang"] = parts[1]
         answer(cq)
         show_start(uid, chat)
+        return
+    if not db["cfg"]["enabled"] and not admin:
+        answer(cq, tr(uid, "maintenance"), True)
         return
     if not u["lang"]:
         answer(cq)
@@ -883,9 +1084,6 @@ def handle_callback(cq):
     if head == "ig" and len(parts) > 2 and USERNAME.match(parts[2]):
         code, name = parts[1], parts[2]
         arg = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-        if code in ("hl", "hs", "re", "rf", "tg", "tr") and not is_premium(uid):
-            answer(cq, tr(uid, "locked"), True)
-            return
         answer(cq)
         if code == "st":
             send_items(uid, chat, "stories", name, arg)
@@ -929,12 +1127,6 @@ def handle_callback(cq):
             lst.remove(parts[1])
         answer(cq)
         send(chat, tr(uid, "track_removed", u=h(parts[1])))
-    elif head == "buy" and len(parts) > 1 and parts[1] in PLANS:
-        name, stars, days = PLANS[parts[1]]
-        answer(cq)
-        api("sendInvoice", chat_id=chat, title=name[:32], description=tr(uid, "plan_desc", days=days),
-            payload=f"plan:{parts[1]}:{uid}", provider_token="", currency="XTR",
-            prices=[{"label": name[:32], "amount": stars}])
     elif head == "set" and len(parts) > 1:
         what = parts[1]
         answer(cq)
@@ -955,28 +1147,8 @@ def handle_callback(cq):
             for k in ("users", "history", "tracked"):
                 db[k].pop(str(uid), None)
             send(chat, text, {"remove_keyboard": True})
-    elif head == "bc" and uid == OWNER_ID:
-        answer(cq)
-        text = PENDING_BC.pop(uid, None)
-        if parts[1] == "yes" and text:
-            ok = fail = 0
-            for k, x in list(db["users"].items()):
-                if x["banned"]:
-                    continue
-                r = send(int(k), h(text))
-                ok, fail = (ok + 1, fail) if r.get("ok") else (ok, fail + 1)
-                time.sleep(0.05)
-            send(chat, f"📣 Tugadi. Yuborildi: {ok}, xato: {fail}")
     else:
         answer(cq)
-
-
-def handle_precheckout(q):
-    ok = valid_payment(q["from"]["id"], q["invoice_payload"], q["currency"], q["total_amount"])
-    p = {"pre_checkout_query_id": q["id"], "ok": ok}
-    if not ok:
-        p["error_message"] = "Tarif mavjud emas"
-    api("answerPreCheckoutQuery", **p)
 
 
 def handle_update(upd):
@@ -984,8 +1156,6 @@ def handle_update(upd):
         handle_message(upd["message"])
     elif "callback_query" in upd:
         handle_callback(upd["callback_query"])
-    elif "pre_checkout_query" in upd:
-        handle_precheckout(upd["pre_checkout_query"])
 
 
 # ---------------------------------------------------------------- kuzatuv
@@ -1009,7 +1179,7 @@ def check_tracked():
             what = ("followers_changed", dict(a=old["f"], b=p["followers"]))
         if what:
             for uid in uids:
-                if user(uid)["notif"] and is_premium(uid):
+                if user(uid)["notif"] and not user(uid)["banned"]:
                     send(uid, tr(uid, "track_note", u=h(name), what=tr(uid, what[0], **what[1])))
         time.sleep(1)
     save()
@@ -1017,6 +1187,7 @@ def check_tracked():
 
 def main():
     try:
+        import sys
         sys.stdout.reconfigure(line_buffering=True)   # hosting loglarida chiqishlar darrov ko'rinsin
     except Exception:
         pass
@@ -1031,13 +1202,12 @@ def main():
     api("setMyCommands", commands=[{"command": "start", "description": "Boshlash"}])
     print("Bot ishga tushdi: @" + me["result"]["username"])
     if not PROVIDER_URL:
-        print("Eslatma: PROVIDER_URL bo'sh, profil ma'lumotlari olinmaydi (menyu va boshqalar ishlaydi).")
-    print("Telegram'da botga /start yuboring. To'xtatish: Ctrl+C")
+        print("Eslatma: PROVIDER_URL bo'sh, profil ma'lumotlari olinmaydi (menyu, admin panel va post havolasi ishlaydi).")
+    print("Telegram'da botga /start yuboring. Admin panel: /admin. To'xtatish: Ctrl+C")
     offset, last_track = 0, time.time()
     while True:
         try:
-            res = api("getUpdates", offset=offset, timeout=30,
-                      allowed_updates=["message", "callback_query", "pre_checkout_query"])
+            res = api("getUpdates", offset=offset, timeout=30, allowed_updates=["message", "callback_query"])
             for upd in res.get("result", []):
                 offset = upd["update_id"] + 1
                 try:
