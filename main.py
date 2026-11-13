@@ -407,6 +407,8 @@ def to_int(v):
 
 
 def map_profile(username, d):
+    if isinstance(d, dict) and isinstance(d.get("items"), list) and d["items"]:
+        d = d["items"][0]
     return {"username": str(pick(d, "username", "ownerUsername") or username).lower(),
             "full_name": pick(d, "full_name", "fullName", "ownerFullName", "name") or "",
             "bio": pick(d, "bio", "biography") or "",
