@@ -38,8 +38,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "8741379218"))
 ADMIN_IDS = {OWNER_ID}          # boshqa adminlar ID'sini shu yerga qo'shing: {OWNER_ID, 123456789}
 
-PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # masalan: "https://api.provider.com/v1"
+PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # Eski provayder sozlamasi (Apify ishlatilganda kerak emas).
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip() or PROVIDER_KEY
+APIFY_ACTOR = os.getenv("APIFY_ACTOR", "apify/instagram-scraper").strip()
+APIFY_STORIES_ACTOR = "lance_api/instagram-stories-scraper-api"
 # Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
 # masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
 PROXY = os.getenv("PROXY", "")
@@ -82,7 +85,7 @@ T = {
         "followers": "Obunachilar", "following": "Obunalar", "posts": "Postlar", "stories": "Hikoyalar",
         "choose_action": "@{u} profili uchun amalni tanlang 👇",
         "btn_view": "Profilni ko'rib chiqish", "btn_stories": "Hikoyalar", "btn_posts": "Postlar",
-        "btn_highlights": "Dolzarb", "btn_reels": "Reels", "btn_refresh": "Qayta ulanishlar",
+        "btn_highlights": "Istorya", "btn_reels": "Reels", "btn_refresh": "Qayta ulanishlar",
         "btn_tagged": "Qayd etilganlar", "btn_track": "Kuzatuv", "btn_analytics": "Tahlillar",
         "empty": "Hech narsa topilmadi.",
         "next": "➡️ Keyingisi ({a}/{b})",
@@ -133,7 +136,7 @@ T = {
         "followers": "Подписчики", "following": "Подписки", "posts": "Публикации", "stories": "Истории",
         "choose_action": "Выберите действие для профиля @{u} 👇",
         "btn_view": "Открыть профиль", "btn_stories": "Истории", "btn_posts": "Посты",
-        "btn_highlights": "Актуальное", "btn_reels": "Reels", "btn_refresh": "Обновить",
+        "btn_highlights": "Сторис", "btn_reels": "Reels", "btn_refresh": "Обновить",
         "btn_tagged": "Отметки", "btn_track": "Слежение", "btn_analytics": "Аналитика",
         "empty": "Ничего не найдено.",
         "next": "➡️ Далее ({a}/{b})",
@@ -252,18 +255,29 @@ def fmt_taken(v):
 
 # ---------------------------------------------------------------- Telegram API
 def api(method, **params):
-    req = urllib.request.Request(API + method, data=json.dumps(params).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")
-        if e.code == 409:
-            print("[409] Shu token bilan boshqa nusxa ishlayapti. Eski oynani/dasturni to'xtating.")
-        else:
-            print(f"[API {method}] HTTP {e.code}: {body[:200]}")
-        return {"ok": False, "code": e.code}
+    # Telegram flood-control: retry_after ko‘rsatilgan vaqt kutib, so‘rovni bir marta takrorlaymiz.
+    for attempt in range(2):
+        req = urllib.request.Request(API + method, data=json.dumps(params).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            if e.code == 429 and attempt == 0:
+                try:
+                    retry_after = int(json.loads(body).get("parameters", {}).get("retry_after", 5))
+                except (ValueError, TypeError, AttributeError):
+                    retry_after = 5
+                print(f"[429] Telegram limiti: {retry_after} soniya kutilyapti.")
+                time.sleep(max(1, min(retry_after, 60)))
+                continue
+            if e.code == 409:
+                print("[409] Shu token bilan boshqa nusxa ishlayapti. Eski oynani/dasturni to'xtating.")
+            else:
+                print(f"[API {method}] HTTP {e.code}: {body[:200]}")
+            return {"ok": False, "code": e.code}
+    return {"ok": False, "code": 429}
 
 
 def send(chat, text, markup=None, **kw):
@@ -340,22 +354,84 @@ class ProviderError(Exception):
         self.code = code
 
 
+def _profile_user_id(data):
+    """Profil natijasidan Instagram'ning raqamli user ID sini topadi."""
+    keys = ("id", "pk", "user_id", "userId", "user_pk", "userPk", "owner_id", "ownerId")
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in keys:
+                candidate = item.get(key)
+                if candidate is not None and str(candidate).isdigit() and 1 <= len(str(candidate)) <= 20:
+                    return str(candidate)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
 def provider_get(kind, value, param="username"):
-    if not PROVIDER_URL:
+    """Apify Instagram Scraper'ni ishga tushiradi va natijalarni datasetdan oladi."""
+    if not APIFY_TOKEN:
         raise ProviderError("not_configured")
-    url = f"{PROVIDER_URL.rstrip('/')}/instagram/{kind}?" + urllib.parse.urlencode({param: value})
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {PROVIDER_KEY}", "Accept": "application/json"})
+    result_types = {
+        "profile": "details", "posts": "posts", "reels": "reels",
+        "stories": "stories", "tagged": "mentions", "media": "posts",
+    }
+    if kind == "stories":
+        # Stories actor username'ni bevosita qabul qiladi; profil ID uchun
+        # alohida Apify chaqiruvi kerak emas, shu sabab tezroq ishlaydi.
+        actor_id = APIFY_STORIES_ACTOR.replace("/", "~")
+        endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
+                    f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
+        payload = {"usernames": [value]}
+    else:
+        result_type = result_types.get(kind)
+        if not result_type:
+            raise ProviderError("unsupported", f"{kind} Apify actorida qo'llanmaydi")
+        direct_url = value if param == "url" else f"https://www.instagram.com/{value}/"
+        actor_id = APIFY_ACTOR.replace("/", "~")
+        endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
+                    f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
+        payload = {
+            "resultsType": result_type,
+            "directUrls": [direct_url],
+            "resultsLimit": 20 if kind in ("posts", "reels", "tagged") else 1,
+        }
+    req = urllib.request.Request(
+        endpoint, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        with urllib.request.urlopen(req, timeout=210) as r:
             data = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise ProviderError({404: "not_found", 403: "private", 429: "rate_limit"}.get(e.code, "error"), f"HTTP {e.code}")
+        detail = e.read().decode("utf-8", "replace")[:500]
+        code = {401: "not_configured", 403: "private", 404: "not_found", 429: "rate_limit"}.get(e.code, "error")
+        raise ProviderError(code, f"Apify HTTP {e.code}: {detail}")
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         raise ProviderError("error", repr(e))
+    if isinstance(data, list):
+        return {"items": data}
     if isinstance(data, dict):
-        return data.get("data", data)
-    return {"items": data} if isinstance(data, list) else {}
-
+        if data.get("error"):
+            raise ProviderError("error", str(data.get("error"))[:500])
+        rows = data.get("items") or data.get("data") or []
+        if isinstance(rows, list):
+            # GetSocialAPI dataset qatorlarida haqiqiy Instagram natijasi "data" ichida keladi.
+            flattened = []
+            for row in rows:
+                nested = row.get("data") if isinstance(row, dict) else None
+                if isinstance(nested, list):
+                    flattened.extend(nested)
+                elif isinstance(nested, dict):
+                    nested_items = nested.get("items") or nested.get("stories")
+                    flattened.extend(nested_items if isinstance(nested_items, list) else [nested])
+                else:
+                    flattened.append(row)
+            return {"items": flattened}
+        return rows
+    return {"items": []}
 
 def cached(kind, value, refresh=False, ttl=300, param="username"):
     hit = CACHE.get((kind, value))
@@ -381,15 +457,17 @@ def to_int(v):
 
 
 def map_profile(username, d):
-    return {"username": str(pick(d, "username") or username).lower(),
-            "full_name": pick(d, "full_name", "name") or "",
+    if isinstance(d, dict) and isinstance(d.get("items"), list) and d["items"]:
+        d = d["items"][0]
+    return {"username": str(pick(d, "username", "ownerUsername") or username).lower(),
+            "full_name": pick(d, "full_name", "fullName", "ownerFullName", "name") or "",
             "bio": pick(d, "bio", "biography") or "",
-            "avatar": pick(d, "avatar_url", "profile_pic_url_hd", "profile_pic_url"),
-            "followers": to_int(pick(d, "followers", "follower_count")),
-            "following": to_int(pick(d, "following", "following_count")),
-            "posts": to_int(pick(d, "posts", "media_count")),
-            "private": bool(pick(d, "is_private", "private")),
-            "stories": bool(pick(d, "has_stories", "has_story"))}
+            "avatar": pick(d, "avatar_url", "profilePicUrlHd", "profilePicUrl", "profile_pic_url_hd", "profile_pic_url"),
+            "followers": to_int(pick(d, "followers", "followersCount", "follower_count")),
+            "following": to_int(pick(d, "following", "followsCount", "following_count")),
+            "posts": to_int(pick(d, "posts", "postsCount", "media_count")),
+            "private": bool(pick(d, "is_private", "isPrivate", "private")),
+            "stories": bool(pick(d, "has_stories", "hasStories", "has_story"))}
 
 
 def map_items(d):
@@ -398,16 +476,32 @@ def map_items(d):
     for it in raw or []:
         if not isinstance(it, dict):
             continue
-        video = pick(it, "video_url")
-        url = video or pick(it, "url", "image_url", "display_url", "media_url")
+        video = pick(it, "video_url", "videoUrl", "play_url")
+        videos = it.get("video_versions") or it.get("videoVersions") or []
+        if not video and videos and isinstance(videos[0], dict):
+            video = pick(videos[0], "url", "src")
+        images = it.get("image_versions2") or it.get("imageVersions2") or {}
+        candidates = images.get("candidates", []) if isinstance(images, dict) else []
+        url = video or pick(it, "url", "image_url", "imageUrl", "display_url", "displayUrl", "coverUrl", "media_url", "mediaUrl")
+        if not url and candidates and isinstance(candidates[0], dict):
+            url = pick(candidates[0], "url", "src")
+        if not url and isinstance(it.get("images"), list) and it["images"]:
+            first = it["images"][0]
+            url = first if isinstance(first, str) else pick(first, "url", "src")
         if not url:
             continue
-        out.append({"url": url, "video": bool(video) or str(it.get("type", "")).lower() in ("video", "reel"),
-                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "timestamp"),
-                    "likes": to_int(pick(it, "likes", "like_count")),
-                    "comments": to_int(pick(it, "comments", "comment_count")),
-                    "views": to_int(pick(it, "views", "view_count", "play_count")),
-                    "link": pick(it, "link", "permalink")})
+        caption_value = pick(it, "caption", "text") or ""
+        if isinstance(caption_value, dict):
+            caption_value = caption_value.get("text", "")
+        kind = str(pick(it, "type", "media_type", "mediaType") or "").lower()
+        if kind == "2":
+            kind = "video"
+        out.append({"url": url, "video": bool(video) or kind in ("video", "reel"),
+                    "caption": caption_value, "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso", "postedAt", "created_at"),
+                    "likes": to_int(pick(it, "likes", "likesCount", "like_count")),
+                    "comments": to_int(pick(it, "comments", "commentsCount", "comment_count")),
+                    "views": to_int(pick(it, "views", "videoViewCount", "videoPlayCount", "view_count", "play_count")),
+                    "link": pick(it, "link", "permalink", "url")})
     return out
 
 
@@ -453,7 +547,7 @@ def ytdlp_media(url):
 
 
 def fetch_post(url):
-    if PROVIDER_URL:
+    if APIFY_TOKEN:
         try:
             return map_items(cached("media", url, param="url"))
         except ProviderError as e:
@@ -491,10 +585,10 @@ def action_kb(uid, name):
     rows = []
     if "btn_view" not in off:
         rows.append([{"text": "🔳 " + tr(uid, "btn_view"), "url": f"https://www.instagram.com/{name}/"}])
-    for pair in ([b("btn_stories", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
-                 [b("btn_highlights", f"ig:hl:{name}"), b("btn_reels", f"ig:re:{name}:0")],
-                 [b("btn_refresh", f"ig:rf:{name}"), b("btn_tagged", f"ig:tg:{name}:0")],
-                 [b("btn_track", f"ig:tr:{name}"), b("btn_analytics", f"ig:an:{name}")]):
+    for pair in ([b("btn_highlights", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
+                 [b("btn_reels", f"ig:re:{name}:0"), b("btn_refresh", f"ig:rf:{name}")],
+                 [b("btn_tagged", f"ig:tg:{name}:0"), b("btn_track", f"ig:tr:{name}")],
+                 [b("btn_analytics", f"ig:an:{name}")]):
         row = [x for x in pair if x]
         if row:
             rows.append(row)
@@ -658,7 +752,9 @@ def send_items(uid, chat, kind, name, page):
         return
     code = {"stories": "st", "posts": "po", "reels": "re", "tagged": "tg"}[kind]
     chunk = items[page * PAGE:(page + 1) * PAGE]
-    for it in chunk:
+    for index, it in enumerate(chunk):
+        if index:
+            time.sleep(1.1)  # bitta chatga xabarlarni Telegram tezlik limitidan oshirmay yuborish
         send_item(chat, it)
     shown = page * PAGE + len(chunk)
     if shown < len(items):
@@ -1094,16 +1190,11 @@ def handle_callback(cq):
         elif code == "tg":
             send_items(uid, chat, "tagged", name, arg)
         elif code == "hl":
-            send_highlights(uid, chat, name)
+            # Eski profil kartalaridagi highlights tugmasini ham Stories ga yo‘naltiramiz.
+            send_items(uid, chat, "stories", name, arg)
         elif code == "hs":
-            try:
-                hl = map_highlights(cached("highlights", name))
-                items = hl[arg]["items"][:10] if arg < len(hl) else []
-            except ProviderError as e:
-                send(chat, provider_msg(uid, "highlights:" + name, e))
-                return
-            for it in items:
-                send_item(chat, it)
+            # Eski Highlights ichki tugmasi ham oddiy Stories ro‘yxatiga yo‘naltiriladi.
+            send_items(uid, chat, "stories", name, arg)
             if not items:
                 send(chat, tr(uid, "empty"))
         elif code == "rf":
@@ -1201,8 +1292,8 @@ def main():
         return
     api("setMyCommands", commands=[{"command": "start", "description": "Boshlash"}])
     print("Bot ishga tushdi: @" + me["result"]["username"])
-    if not PROVIDER_URL:
-        print("Eslatma: PROVIDER_URL bo'sh, profil ma'lumotlari olinmaydi (menyu, admin panel va post havolasi ishlaydi).")
+    if not APIFY_TOKEN:
+        print("Eslatma: APIFY_TOKEN topilmadi, Instagram ma'lumotlari olinmaydi.")
     print("Telegram'da botga /start yuboring. Admin panel: /admin. To'xtatish: Ctrl+C")
     offset, last_track = 0, time.time()
     while True:
