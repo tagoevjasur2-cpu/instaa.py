@@ -354,6 +354,23 @@ class ProviderError(Exception):
         self.code = code
 
 
+def _profile_user_id(data):
+    """Profil natijasidan Instagram'ning raqamli user ID sini topadi."""
+    keys = ("id", "pk", "user_id", "userId", "user_pk", "userPk", "owner_id", "ownerId")
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in keys:
+                candidate = item.get(key)
+                if candidate is not None and str(candidate).isdigit() and 1 <= len(str(candidate)) <= 20:
+                    return str(candidate)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
 def provider_get(kind, value, param="username"):
     """Apify Instagram Scraper'ni ishga tushiradi va natijalarni datasetdan oladi."""
     if not APIFY_TOKEN:
@@ -363,10 +380,16 @@ def provider_get(kind, value, param="username"):
         "stories": "stories", "tagged": "mentions", "media": "posts",
     }
     if kind == "stories":
+        # GetSocialAPI stories endpoint raqamli Instagram user_id talab qiladi,
+        # username emas. Avval standart scraper orqali profil ID sini olamiz.
+        profile_data = cached("profile", value, ttl=120)
+        user_id = _profile_user_id(profile_data)
+        if not user_id:
+            raise ProviderError("not_found", f"Instagram numeric user_id topilmadi: {value}")
         actor_id = APIFY_STORIES_ACTOR.replace("/", "~")
         endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
                     f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
-        payload = {"operation": "stories", "target": value}
+        payload = {"operation": "stories", "target": user_id}
     else:
         result_type = result_types.get(kind)
         if not result_type:
