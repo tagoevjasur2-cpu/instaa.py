@@ -42,7 +42,7 @@ PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # Eski provayder sozlamasi (Apify
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip() or PROVIDER_KEY
 APIFY_ACTOR = os.getenv("APIFY_ACTOR", "apify/instagram-scraper").strip()
-APIFY_STORIES_ACTOR = os.getenv("APIFY_STORIES_ACTOR", "lance_api/instagram-stories-scraper-api").strip()
+APIFY_STORIES_ACTOR = "lance_api/instagram-stories-scraper-api"
 # Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
 # masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
 PROXY = os.getenv("PROXY", "")
