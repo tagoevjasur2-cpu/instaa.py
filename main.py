@@ -255,18 +255,29 @@ def fmt_taken(v):
 
 # ---------------------------------------------------------------- Telegram API
 def api(method, **params):
-    req = urllib.request.Request(API + method, data=json.dumps(params).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")
-        if e.code == 409:
-            print("[409] Shu token bilan boshqa nusxa ishlayapti. Eski oynani/dasturni to'xtating.")
-        else:
-            print(f"[API {method}] HTTP {e.code}: {body[:200]}")
-        return {"ok": False, "code": e.code}
+    # Telegram flood-control: retry_after ko‘rsatilgan vaqt kutib, so‘rovni bir marta takrorlaymiz.
+    for attempt in range(2):
+        req = urllib.request.Request(API + method, data=json.dumps(params).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            if e.code == 429 and attempt == 0:
+                try:
+                    retry_after = int(json.loads(body).get("parameters", {}).get("retry_after", 5))
+                except (ValueError, TypeError, AttributeError):
+                    retry_after = 5
+                print(f"[429] Telegram limiti: {retry_after} soniya kutilyapti.")
+                time.sleep(max(1, min(retry_after, 60)))
+                continue
+            if e.code == 409:
+                print("[409] Shu token bilan boshqa nusxa ishlayapti. Eski oynani/dasturni to'xtating.")
+            else:
+                print(f"[API {method}] HTTP {e.code}: {body[:200]}")
+            return {"ok": False, "code": e.code}
+    return {"ok": False, "code": 429}
 
 
 def send(chat, text, markup=None, **kw):
@@ -722,7 +733,9 @@ def send_items(uid, chat, kind, name, page):
         return
     code = {"stories": "st", "posts": "po", "reels": "re", "tagged": "tg"}[kind]
     chunk = items[page * PAGE:(page + 1) * PAGE]
-    for it in chunk:
+    for index, it in enumerate(chunk):
+        if index:
+            time.sleep(1.1)  # bitta chatga xabarlarni Telegram tezlik limitidan oshirmay yuborish
         send_item(chat, it)
     shown = page * PAGE + len(chunk)
     if shown < len(items):
@@ -1161,14 +1174,8 @@ def handle_callback(cq):
             # Eski profil kartalaridagi highlights tugmasini ham Stories ga yo‘naltiramiz.
             send_items(uid, chat, "stories", name, arg)
         elif code == "hs":
-            try:
-                hl = map_highlights(cached("highlights", name))
-                items = hl[arg]["items"][:10] if arg < len(hl) else []
-            except ProviderError as e:
-                send(chat, provider_msg(uid, "highlights:" + name, e))
-                return
-            for it in items:
-                send_item(chat, it)
+            # Eski Highlights ichki tugmasi ham oddiy Stories ro‘yxatiga yo‘naltiriladi.
+            send_items(uid, chat, "stories", name, arg)
             if not items:
                 send(chat, tr(uid, "empty"))
         elif code == "rf":
