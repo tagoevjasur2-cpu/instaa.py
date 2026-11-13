@@ -440,7 +440,7 @@ def map_items(d):
             url = first if isinstance(first, str) else pick(first, "url", "src")
         if not url:
             continue
-        kind = str(pick(it, "type", "media_type") or "").lower()
+        kind = str(pick(it, "type", "media_type", "mediaType") or "").lower()
         out.append({"url": url, "video": bool(video) or kind in ("video", "reel"),
                     "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso", "postedAt", "created_at"),
                     "likes": to_int(pick(it, "likes", "likesCount", "like_count")),
