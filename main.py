@@ -1194,9 +1194,8 @@ def handle_callback(cq):
             send_items(uid, chat, "stories", name, arg)
         elif code == "hs":
             # Eski Highlights ichki tugmasi ham oddiy Stories ro‘yxatiga yo‘naltiriladi.
+            # send_items bo‘sh natijani o‘zi qayta ishlaydi.
             send_items(uid, chat, "stories", name, arg)
-            if not items:
-                send(chat, tr(uid, "empty"))
         elif code == "rf":
             lookup(uid, chat, name, refresh=True)
         elif code == "op":
