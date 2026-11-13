@@ -1158,7 +1158,8 @@ def handle_callback(cq):
         elif code == "tg":
             send_items(uid, chat, "tagged", name, arg)
         elif code == "hl":
-            send_highlights(uid, chat, name)
+            # Eski profil kartalaridagi highlights tugmasini ham Stories ga yo‘naltiramiz.
+            send_items(uid, chat, "stories", name, arg)
         elif code == "hs":
             try:
                 hl = map_highlights(cached("highlights", name))
