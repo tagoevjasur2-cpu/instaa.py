@@ -1285,9 +1285,20 @@ def main():
         print("XATO: BOT_TOKEN topilmadi. Hosting sozlamalarida BOT_TOKEN o'zgaruvchisini kiriting.")
         return
     load()
-    me = api("getMe")
-    if not me.get("ok"):
-        print("Token noto'g'ri yoki Telegram'ga ulanib bo'lmadi:", me)
+    # Telegram/hosting gateway vaqtincha 502/503/504 qaytarsa, botni
+    # butunlay to'xtatmaymiz: eksponensial kutish bilan qayta urinib ko'ramiz.
+    delay = 5
+    while True:
+        me = api("getMe")
+        if me.get("ok"):
+            break
+        code = me.get("code")
+        if code in (502, 503, 504):
+            print(f"Telegram API vaqtincha HTTP {code} qaytardi. {delay} soniyadan keyin qayta uriniladi.")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+            continue
+        print("Bot ishga tushmadi. Telegram API javobi:", me)
         return
     api("setMyCommands", commands=[{"command": "start", "description": "Boshlash"}])
     print("Bot ishga tushdi: @" + me["result"]["username"])
