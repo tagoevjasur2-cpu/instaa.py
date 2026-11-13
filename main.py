@@ -38,8 +38,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "8741379218"))
 ADMIN_IDS = {OWNER_ID}          # boshqa adminlar ID'sini shu yerga qo'shing: {OWNER_ID, 123456789}
 
-PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # masalan: "https://api.provider.com/v1"
+PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # Eski provayder sozlamasi (Apify ishlatilganda kerak emas).
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip() or PROVIDER_KEY
+APIFY_ACTOR = os.getenv("APIFY_ACTOR", "apify/instagram-scraper").strip()
 # Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
 # masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
 PROXY = os.getenv("PROXY", "")
@@ -341,21 +343,45 @@ class ProviderError(Exception):
 
 
 def provider_get(kind, value, param="username"):
-    if not PROVIDER_URL:
+    """Apify Instagram Scraper'ni ishga tushiradi va natijalarni datasetdan oladi."""
+    if not APIFY_TOKEN:
         raise ProviderError("not_configured")
-    url = f"{PROVIDER_URL.rstrip('/')}/instagram/{kind}?" + urllib.parse.urlencode({param: value})
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {PROVIDER_KEY}", "Accept": "application/json"})
+    result_types = {
+        "profile": "details", "posts": "posts", "reels": "reels",
+        "stories": "stories", "tagged": "mentions", "media": "posts",
+    }
+    result_type = result_types.get(kind)
+    if not result_type:
+        raise ProviderError("unsupported", f"{kind} Apify actorida qo'llanmaydi")
+    direct_url = value if param == "url" else f"https://www.instagram.com/{value}/"
+    actor_id = APIFY_ACTOR.replace("/", "~")
+    endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
+                f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
+    payload = {
+        "resultsType": result_type,
+        "directUrls": [direct_url],
+        "resultsLimit": 20 if kind in ("posts", "reels", "stories", "tagged") else 1,
+    }
+    req = urllib.request.Request(
+        endpoint, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        with urllib.request.urlopen(req, timeout=210) as r:
             data = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise ProviderError({404: "not_found", 403: "private", 429: "rate_limit"}.get(e.code, "error"), f"HTTP {e.code}")
+        detail = e.read().decode("utf-8", "replace")[:500]
+        code = {401: "not_configured", 403: "private", 404: "not_found", 429: "rate_limit"}.get(e.code, "error")
+        raise ProviderError(code, f"Apify HTTP {e.code}: {detail}")
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         raise ProviderError("error", repr(e))
+    if isinstance(data, list):
+        return {"items": data}
     if isinstance(data, dict):
-        return data.get("data", data)
-    return {"items": data} if isinstance(data, list) else {}
-
+        if data.get("error"):
+            raise ProviderError("error", str(data.get("error"))[:500])
+        rows = data.get("items") or data.get("data") or []
+        return {"items": rows} if isinstance(rows, list) else rows
+    return {"items": []}
 
 def cached(kind, value, refresh=False, ttl=300, param="username"):
     hit = CACHE.get((kind, value))
@@ -381,15 +407,15 @@ def to_int(v):
 
 
 def map_profile(username, d):
-    return {"username": str(pick(d, "username") or username).lower(),
-            "full_name": pick(d, "full_name", "name") or "",
+    return {"username": str(pick(d, "username", "ownerUsername") or username).lower(),
+            "full_name": pick(d, "full_name", "fullName", "ownerFullName", "name") or "",
             "bio": pick(d, "bio", "biography") or "",
-            "avatar": pick(d, "avatar_url", "profile_pic_url_hd", "profile_pic_url"),
-            "followers": to_int(pick(d, "followers", "follower_count")),
-            "following": to_int(pick(d, "following", "following_count")),
-            "posts": to_int(pick(d, "posts", "media_count")),
-            "private": bool(pick(d, "is_private", "private")),
-            "stories": bool(pick(d, "has_stories", "has_story"))}
+            "avatar": pick(d, "avatar_url", "profilePicUrlHd", "profilePicUrl", "profile_pic_url_hd", "profile_pic_url"),
+            "followers": to_int(pick(d, "followers", "followersCount", "follower_count")),
+            "following": to_int(pick(d, "following", "followsCount", "following_count")),
+            "posts": to_int(pick(d, "posts", "postsCount", "media_count")),
+            "private": bool(pick(d, "is_private", "isPrivate", "private")),
+            "stories": bool(pick(d, "has_stories", "hasStories", "has_story"))}
 
 
 def map_items(d):
@@ -398,16 +424,20 @@ def map_items(d):
     for it in raw or []:
         if not isinstance(it, dict):
             continue
-        video = pick(it, "video_url")
-        url = video or pick(it, "url", "image_url", "display_url", "media_url")
+        video = pick(it, "video_url", "videoUrl")
+        url = video or pick(it, "url", "image_url", "display_url", "displayUrl", "coverUrl", "media_url")
+        if not url and isinstance(it.get("images"), list) and it["images"]:
+            first = it["images"][0]
+            url = first if isinstance(first, str) else pick(first, "url", "src")
         if not url:
             continue
-        out.append({"url": url, "video": bool(video) or str(it.get("type", "")).lower() in ("video", "reel"),
-                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "timestamp"),
-                    "likes": to_int(pick(it, "likes", "like_count")),
-                    "comments": to_int(pick(it, "comments", "comment_count")),
-                    "views": to_int(pick(it, "views", "view_count", "play_count")),
-                    "link": pick(it, "link", "permalink")})
+        kind = str(pick(it, "type", "media_type") or "").lower()
+        out.append({"url": url, "video": bool(video) or kind in ("video", "reel"),
+                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso"),
+                    "likes": to_int(pick(it, "likes", "likesCount", "like_count")),
+                    "comments": to_int(pick(it, "comments", "commentsCount", "comment_count")),
+                    "views": to_int(pick(it, "views", "videoViewCount", "videoPlayCount", "view_count", "play_count")),
+                    "link": pick(it, "link", "permalink", "url")})
     return out
 
 
@@ -453,7 +483,7 @@ def ytdlp_media(url):
 
 
 def fetch_post(url):
-    if PROVIDER_URL:
+    if APIFY_TOKEN:
         try:
             return map_items(cached("media", url, param="url"))
         except ProviderError as e:
@@ -1201,8 +1231,8 @@ def main():
         return
     api("setMyCommands", commands=[{"command": "start", "description": "Boshlash"}])
     print("Bot ishga tushdi: @" + me["result"]["username"])
-    if not PROVIDER_URL:
-        print("Eslatma: PROVIDER_URL bo'sh, profil ma'lumotlari olinmaydi (menyu, admin panel va post havolasi ishlaydi).")
+    if not APIFY_TOKEN:
+        print("Eslatma: APIFY_TOKEN topilmadi, Instagram ma'lumotlari olinmaydi.")
     print("Telegram'da botga /start yuboring. Admin panel: /admin. To'xtatish: Ctrl+C")
     offset, last_track = 0, time.time()
     while True:
