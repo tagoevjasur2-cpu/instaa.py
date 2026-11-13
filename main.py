@@ -387,7 +387,20 @@ def provider_get(kind, value, param="username"):
         if data.get("error"):
             raise ProviderError("error", str(data.get("error"))[:500])
         rows = data.get("items") or data.get("data") or []
-        return {"items": rows} if isinstance(rows, list) else rows
+        if isinstance(rows, list):
+            # GetSocialAPI dataset qatorlarida haqiqiy Instagram natijasi "data" ichida keladi.
+            flattened = []
+            for row in rows:
+                nested = row.get("data") if isinstance(row, dict) else None
+                if isinstance(nested, list):
+                    flattened.extend(nested)
+                elif isinstance(nested, dict):
+                    nested_items = nested.get("items") or nested.get("stories")
+                    flattened.extend(nested_items if isinstance(nested_items, list) else [nested])
+                else:
+                    flattened.append(row)
+            return {"items": flattened}
+        return rows
     return {"items": []}
 
 def cached(kind, value, refresh=False, ttl=300, param="username"):
@@ -433,16 +446,28 @@ def map_items(d):
     for it in raw or []:
         if not isinstance(it, dict):
             continue
-        video = pick(it, "video_url", "videoUrl")
+        video = pick(it, "video_url", "videoUrl", "play_url")
+        videos = it.get("video_versions") or it.get("videoVersions") or []
+        if not video and videos and isinstance(videos[0], dict):
+            video = pick(videos[0], "url", "src")
+        images = it.get("image_versions2") or it.get("imageVersions2") or {}
+        candidates = images.get("candidates", []) if isinstance(images, dict) else []
         url = video or pick(it, "url", "image_url", "imageUrl", "display_url", "displayUrl", "coverUrl", "media_url", "mediaUrl")
+        if not url and candidates and isinstance(candidates[0], dict):
+            url = pick(candidates[0], "url", "src")
         if not url and isinstance(it.get("images"), list) and it["images"]:
             first = it["images"][0]
             url = first if isinstance(first, str) else pick(first, "url", "src")
         if not url:
             continue
+        caption_value = pick(it, "caption", "text") or ""
+        if isinstance(caption_value, dict):
+            caption_value = caption_value.get("text", "")
         kind = str(pick(it, "type", "media_type", "mediaType") or "").lower()
+        if kind == "2":
+            kind = "video"
         out.append({"url": url, "video": bool(video) or kind in ("video", "reel"),
-                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso", "postedAt", "created_at"),
+                    "caption": caption_value, "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso", "postedAt", "created_at"),
                     "likes": to_int(pick(it, "likes", "likesCount", "like_count")),
                     "comments": to_int(pick(it, "comments", "commentsCount", "comment_count")),
                     "views": to_int(pick(it, "views", "videoViewCount", "videoPlayCount", "view_count", "play_count")),
