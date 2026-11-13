@@ -42,7 +42,7 @@ PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # Eski provayder sozlamasi (Apify
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip() or PROVIDER_KEY
 APIFY_ACTOR = os.getenv("APIFY_ACTOR", "apify/instagram-scraper").strip()
-APIFY_STORIES_ACTOR = os.getenv("APIFY_STORIES_ACTOR", "getsocialapi/instagram-scraper-api").strip()
+APIFY_STORIES_ACTOR = os.getenv("APIFY_STORIES_ACTOR", "lance_api/instagram-stories-scraper-api").strip()
 # Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
 # masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
 PROXY = os.getenv("PROXY", "")
@@ -380,16 +380,12 @@ def provider_get(kind, value, param="username"):
         "stories": "stories", "tagged": "mentions", "media": "posts",
     }
     if kind == "stories":
-        # GetSocialAPI stories endpoint raqamli Instagram user_id talab qiladi,
-        # username emas. Avval standart scraper orqali profil ID sini olamiz.
-        profile_data = cached("profile", value, ttl=120)
-        user_id = _profile_user_id(profile_data)
-        if not user_id:
-            raise ProviderError("not_found", f"Instagram numeric user_id topilmadi: {value}")
+        # Stories actor username'ni bevosita qabul qiladi; profil ID uchun
+        # alohida Apify chaqiruvi kerak emas, shu sabab tezroq ishlaydi.
         actor_id = APIFY_STORIES_ACTOR.replace("/", "~")
         endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
                     f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
-        payload = {"operation": "stories", "target": user_id}
+        payload = {"usernames": [value]}
     else:
         result_type = result_types.get(kind)
         if not result_type:
