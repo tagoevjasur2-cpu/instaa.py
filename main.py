@@ -85,7 +85,7 @@ T = {
         "followers": "Obunachilar", "following": "Obunalar", "posts": "Postlar", "stories": "Hikoyalar",
         "choose_action": "@{u} profili uchun amalni tanlang 👇",
         "btn_view": "Profilni ko'rib chiqish", "btn_stories": "Hikoyalar", "btn_posts": "Postlar",
-        "btn_highlights": "Dolzarb", "btn_reels": "Reels", "btn_refresh": "Qayta ulanishlar",
+        "btn_highlights": "Istorya", "btn_reels": "Reels", "btn_refresh": "Qayta ulanishlar",
         "btn_tagged": "Qayd etilganlar", "btn_track": "Kuzatuv", "btn_analytics": "Tahlillar",
         "empty": "Hech narsa topilmadi.",
         "next": "➡️ Keyingisi ({a}/{b})",
@@ -136,7 +136,7 @@ T = {
         "followers": "Подписчики", "following": "Подписки", "posts": "Публикации", "stories": "Истории",
         "choose_action": "Выберите действие для профиля @{u} 👇",
         "btn_view": "Открыть профиль", "btn_stories": "Истории", "btn_posts": "Посты",
-        "btn_highlights": "Актуальное", "btn_reels": "Reels", "btn_refresh": "Обновить",
+        "btn_highlights": "Сторис", "btn_reels": "Reels", "btn_refresh": "Обновить",
         "btn_tagged": "Отметки", "btn_track": "Слежение", "btn_analytics": "Аналитика",
         "empty": "Ничего не найдено.",
         "next": "➡️ Далее ({a}/{b})",
@@ -530,10 +530,10 @@ def action_kb(uid, name):
     rows = []
     if "btn_view" not in off:
         rows.append([{"text": "🔳 " + tr(uid, "btn_view"), "url": f"https://www.instagram.com/{name}/"}])
-    for pair in ([b("btn_stories", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
-                 [b("btn_highlights", f"ig:hl:{name}"), b("btn_reels", f"ig:re:{name}:0")],
-                 [b("btn_refresh", f"ig:rf:{name}"), b("btn_tagged", f"ig:tg:{name}:0")],
-                 [b("btn_track", f"ig:tr:{name}"), b("btn_analytics", f"ig:an:{name}")]):
+    for pair in ([b("btn_highlights", f"ig:st:{name}:0"), b("btn_posts", f"ig:po:{name}:0")],
+                 [b("btn_reels", f"ig:re:{name}:0"), b("btn_refresh", f"ig:rf:{name}")],
+                 [b("btn_tagged", f"ig:tg:{name}:0"), b("btn_track", f"ig:tr:{name}")],
+                 [b("btn_analytics", f"ig:an:{name}")]):
         row = [x for x in pair if x]
         if row:
             rows.append(row)
