@@ -366,7 +366,7 @@ def provider_get(kind, value, param="username"):
         actor_id = APIFY_STORIES_ACTOR.replace("/", "~")
         endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
                     f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
-        payload = {"operation": "stories", "target": value, "count": 50}
+        payload = {"operation": "stories", "target": value}
     else:
         result_type = result_types.get(kind)
         if not result_type:
