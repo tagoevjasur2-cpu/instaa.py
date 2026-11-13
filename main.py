@@ -42,6 +42,7 @@ PROVIDER_URL = os.getenv("PROVIDER_URL", "")   # Eski provayder sozlamasi (Apify
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip() or PROVIDER_KEY
 APIFY_ACTOR = os.getenv("APIFY_ACTOR", "apify/instagram-scraper").strip()
+APIFY_STORIES_ACTOR = os.getenv("APIFY_STORIES_ACTOR", "getsocialapi/instagram-scraper-api").strip()
 # Instagram bloklangan bo'lsa: VPN'ni butun kompyuter uchun yoqing yoki VPN proksisini yozing,
 # masalan "socks5://127.0.0.1:10808" (faqat yt-dlp uchun).
 PROXY = os.getenv("PROXY", "")
@@ -350,18 +351,24 @@ def provider_get(kind, value, param="username"):
         "profile": "details", "posts": "posts", "reels": "reels",
         "stories": "stories", "tagged": "mentions", "media": "posts",
     }
-    result_type = result_types.get(kind)
-    if not result_type:
-        raise ProviderError("unsupported", f"{kind} Apify actorida qo'llanmaydi")
-    direct_url = value if param == "url" else f"https://www.instagram.com/{value}/"
-    actor_id = APIFY_ACTOR.replace("/", "~")
-    endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
-                f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
-    payload = {
-        "resultsType": result_type,
-        "directUrls": [direct_url],
-        "resultsLimit": 20 if kind in ("posts", "reels", "stories", "tagged") else 1,
-    }
+    if kind == "stories":
+        actor_id = APIFY_STORIES_ACTOR.replace("/", "~")
+        endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
+                    f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
+        payload = {"operation": "stories", "target": value, "count": 50}
+    else:
+        result_type = result_types.get(kind)
+        if not result_type:
+            raise ProviderError("unsupported", f"{kind} Apify actorida qo'llanmaydi")
+        direct_url = value if param == "url" else f"https://www.instagram.com/{value}/"
+        actor_id = APIFY_ACTOR.replace("/", "~")
+        endpoint = (f"https://api.apify.com/v2/acts/{urllib.parse.quote(actor_id, safe='~')}"
+                    f"/run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN)}&timeout=180")
+        payload = {
+            "resultsType": result_type,
+            "directUrls": [direct_url],
+            "resultsLimit": 20 if kind in ("posts", "reels", "tagged") else 1,
+        }
     req = urllib.request.Request(
         endpoint, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
@@ -427,7 +434,7 @@ def map_items(d):
         if not isinstance(it, dict):
             continue
         video = pick(it, "video_url", "videoUrl")
-        url = video or pick(it, "url", "image_url", "display_url", "displayUrl", "coverUrl", "media_url")
+        url = video or pick(it, "url", "image_url", "imageUrl", "display_url", "displayUrl", "coverUrl", "media_url", "mediaUrl")
         if not url and isinstance(it.get("images"), list) and it["images"]:
             first = it["images"][0]
             url = first if isinstance(first, str) else pick(first, "url", "src")
@@ -435,7 +442,7 @@ def map_items(d):
             continue
         kind = str(pick(it, "type", "media_type") or "").lower()
         out.append({"url": url, "video": bool(video) or kind in ("video", "reel"),
-                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso"),
+                    "caption": pick(it, "caption", "text") or "", "taken": pick(it, "taken_at", "takenAt", "timestamp", "takenAtIso", "postedAt", "created_at"),
                     "likes": to_int(pick(it, "likes", "likesCount", "like_count")),
                     "comments": to_int(pick(it, "comments", "commentsCount", "comment_count")),
                     "views": to_int(pick(it, "views", "videoViewCount", "videoPlayCount", "view_count", "play_count")),
